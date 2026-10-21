@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071117">
+  <title>J.A.R.V.I.S. — Personal System</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/settings-fallback.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#top" aria-label="JARVIS home">
+        <span class="brand-mark"><span></span></span>
+        <span class="brand-name">J.A.R.V.I.S.<small>PERSONAL SYSTEM</small></span>
+      </a>
+
+      <div class="connection"><span class="live-dot"></span><span>LOCAL CONSOLE</span><span class="connection-line"></span></div>
+      <div class="side-label">WORKSPACE</div>
+      <nav class="side-nav" aria-label="Main navigation">
+        <a class="nav-item active" href="#assistant"><span class="nav-icon">◉</span> Assistant <span class="nav-count">01</span></a>
+        <button class="nav-item" id="cameraNav"><span class="nav-icon">◎</span> Camera <span class="nav-tag">OPT IN</span></button>
+      </nav>
+
+      <div class="side-label launch-label">QUICK LAUNCH</div>
+      <div class="launch-list" id="launchList">
+        <button class="launch-item" data-app="calculator"><span class="app-glyph glyph-calc">▦</span><span>Calculator</span><span class="launch-arrow">↗</span></button>
+        <button class="launch-item" data-app="explorer"><span class="app-glyph glyph-folder">▰</span><span>File Explorer</span><span class="launch-arrow">↗</span></button>
+        <button class="launch-item" data-app="notepad"><span class="app-glyph glyph-note">▤</span><span>Notepad</span><span class="launch-arrow">↗</span></button>
+        <button class="launch-item" data-app="paint"><span class="app-glyph glyph-paint">◒</span><span>Paint</span><span class="launch-arrow">↗</span></button>
+        <button class="launch-item" data-app="settings"><span class="app-glyph glyph-settings">⚙</span><span>Settings</span><span class="launch-arrow">↗</span></button>
+        <button class="launch-item" data-app="taskmanager"><span class="app-glyph glyph-task">▥</span><span>Task Manager</span><span class="launch-arrow">↗</span></button>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="privacy-badge"><span class="shield">◇</span><div><strong>Privacy first</strong><small>Camera off by default</small></div></div>
+        <button class="settings-link" id="openSettings" type="button"><span>⚙</span> Preferences <span class="kbd">CTRL ,</span></button>
+      </div>
+    </aside>
+
+    <main class="main-area" id="top">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>PERSONAL SYSTEM</span><b>/</b><strong>ASSISTANT</strong></div>
+        <div class="top-actions">
+          <span class="model-chip"><i></i> LOCAL AI <span id="modelChip">QWEN3.5 2B LOCAL</span></span>
+          <button class="background-button" id="backgroundButton" type="button" title="Hide J.A.R.V.I.S. to the system tray"><span>↓</span> BACKGROUND</button>
+          <button class="icon-button" id="topSettings" type="button" aria-label="Open preferences">⚙</button>
+          <div class="avatar">S</div>
+        </div>
+      </header>
+
+      <div class="content-wrap" id="assistant">
+        <section class="welcome-row">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL VOICE ASSISTANT</div>
+            <h1>At your service, <em>sir.</em></h1>
+            <p class="subheading">A voice-first command centre for your Windows workspace.</p>
+          </div>
+          <div class="clock-panel"><span class="clock-icon">◷</span><div><small>LOCAL TIME</small><strong id="clock">--:--</strong></div></div>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="assistant-card panel">
+            <div class="card-topline"><span class="section-kicker"><span class="pulse-mark"></span> JARVIS CORE</span><span class="secure-label"><span>◇</span> SESSION SECURE</span></div>
+            <div class="orb-wrap" aria-hidden="true">
+              <div class="orb-grid"></div><div class="orb-ring ring-a"></div><div class="orb-ring ring-b"></div><div class="orb-ring ring-c"></div>
+              <div class="orb-core"><span class="orb-center"></span><span class="orb-cross cross-v"></span><span class="orb-cross cross-h"></span></div>
+              <span class="orb-tick tick-a"></span><span class="orb-tick tick-b"></span><span class="orb-tick tick-c"></span><span class="orb-tick tick-d"></span>
+            </div>
+            <div class="core-status"><span id="coreDot" class="status-dot"></span><span id="coreStatus">SYSTEMS STANDING BY</span></div>
+            <p class="core-hint" id="coreHint">Say <strong>“Jarvis”</strong> to wake me, sir.</p>
+            <div class="voice-controls">
+              <button class="listen-button" id="listenBtn" type="button"><span class="mic-icon">♩</span><span id="listenLabel">LISTENING IN BACKGROUND</span><span class="listen-light"></span></button>
+              <button class="quiet-button" id="typeBtn" type="button"><span>⌨</span> TYPE INSTEAD</button>
+            </div>
+            <div class="wake-note"><span class="wake-spark">✦</span><span>The app listens while open; the tray takes over when hidden.</span><button id="wakeInfo" aria-label="Wake word info">i</button></div>
+          </section>
+
+          <section class="conversation-card panel">
+            <div class="conversation-header"><div><div class="section-kicker">CONVERSATION</div><h2>Command log</h2></div><button class="clear-button" id="clearChat" title="Clear conversation">↺ <span>Clear</span></button></div>
+            <div class="conversation-list" id="chatList" role="log" aria-live="polite" aria-relevant="additions">
+              <div class="welcome-message" id="welcomeMessage">
+                <span class="welcome-mark">✧</span>
+                <div><strong>Ready when you are, sir.</strong><p>Ask a question, launch an app, or search the web. I’ll take it from here.</p></div>
+              </div>
+            </div>
+            <div class="composer-wrap">
+              <form class="composer" id="chatForm">
+                <label class="sr-only" for="messageInput">Message JARVIS</label>
+                <button class="composer-camera" id="cameraCapture" type="button" title="Ask about the camera view">◎</button>
+                <input id="messageInput" autocomplete="off" placeholder="Give me an instruction, sir…">
+                <button class="composer-mic" id="composerMic" type="button" aria-label="Start voice input">♩</button>
+                <button class="send-button" id="sendButton" type="submit" aria-label="Send message"><span>↑</span></button>
+              </form>
+              <div class="composer-foot"><span><span class="foot-spark">✦</span> LOCAL INTELLIGENCE</span><span>ENTER TO SEND <kbd>↵</kbd></span></div>
+            </div>
+          </section>
+
+          <aside class="right-column">
+            <section class="camera-card panel" id="cameraCard">
+              <div class="side-card-heading"><div><span class="section-kicker">VISUAL INPUT</span><h2>Camera lens</h2></div><span class="off-pill" id="cameraState">OFF</span></div>
+              <div class="camera-preview" id="cameraPreview">
+                <video id="cameraVideo" autoplay playsinline muted></video>
+                <div class="camera-empty" id="cameraEmpty"><span class="camera-lens-icon">◎</span><strong>Lens is closed</strong><small>Nothing is captured until you enable it.</small></div>
+                <span class="camera-corner corner-tl"></span><span class="camera-corner corner-tr"></span><span class="camera-corner corner-bl"></span><span class="camera-corner corner-br"></span>
+                <span class="rec-indicator" id="recIndicator"><i></i> LIVE</span>
+              </div>
+              <p class="camera-copy">Enable your camera to ask JARVIS about a still image. The preview stays local until you ask a question about it.</p>
+              <button class="camera-toggle" id="cameraToggle" type="button"><span>◎</span> ENABLE CAMERA</button>
+            </section>
+
+            <section class="commands-card panel">
+              <div class="side-card-heading"><div><span class="section-kicker">TRY A COMMAND</span><h2>On the ready</h2></div><span class="command-count">04</span></div>
+              <button class="example-command" data-prompt="Open Calculator"><span class="example-icon">▦</span><span>“Open Calculator”</span><span class="example-arrow">↗</span></button>
+              <button class="example-command" data-prompt="Search the web for the latest space news"><span class="example-icon">⌕</span><span>“Search the web for…”</span><span class="example-arrow">↗</span></button>
+              <button class="example-command" data-prompt="What can you see through the camera?"><span class="example-icon">◎</span><span>“What can you see?”</span><span class="example-arrow">↗</span></button>
+              <button class="example-command" data-prompt="Tell me a brief fact about Mars"><span class="example-icon">✧</span><span>“Tell me a fact about…”</span><span class="example-arrow">↗</span></button>
+              <div class="command-tip"><span>✦</span> Say <strong>Jarvis</strong> before any command.</div>
+            </section>
+          </aside>
+        </div>
+        <footer class="page-footer"><span>J.A.R.V.I.S. <b>PERSONAL SYSTEM</b></span><span>BUILT FOR YOUR DESKTOP <i>•</i> RUNNING LOCALLY</span></footer>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <form method="dialog" class="dialog-head"><div><span class="section-kicker">SYSTEM CONFIGURATION</span><h2>Preferences</h2></div><button class="dialog-close" aria-label="Close">×</button></form>
+    <div class="settings-body">
+      <div class="settings-two-col">
+        <div class="setting-block"><label for="modelSelect">Local AI model</label><select id="modelSelect"><option value="qwen3.5:2b">Qwen 3.5 2B · vision enabled</option></select><p>Runs on this PC through Ollama. No AI account, API key, or hosted usage quota. Download size is about 3.1 GB; speed depends on your hardware.</p></div>
+        <div class="setting-block"><label>Local model status</label><div id="localModelStatus" class="voice-provider local-model-status" role="status">Checking Ollama…</div><div class="voice-test-row"><button id="checkLocalAI" class="secondary-button" type="button">CHECK LOCAL MODEL</button><span>First-time setup: install <a href="https://ollama.com/download/windows" target="_blank" rel="noreferrer">Ollama ↗</a>, then run <strong>Setup-Local-AI.cmd</strong> from this folder.</span></div></div>
+      </div>
+      <div class="setting-block"><label for="jarvisVoice">J.A.R.V.I.S. voice</label><select id="jarvisVoice"><option value="25">BM Fable · British male</option><option value="26">BM George · British male</option><option value="24">BM Daniel · British male</option><option value="27">BM Lewis · British male</option></select><div class="voice-test-row"><button id="testVoice" class="secondary-button" type="button">TEST SELECTED VOICE</button><span id="voiceOutputStatus" role="status">Try the British voices and choose the one you prefer.</span></div><p>Speech is generated on this PC without an internet connection or account after setup.</p></div>
+      <div class="setting-block toggle-setting"><div><label for="speakReplies">Speak replies aloud</label><p>Applies to typed replies and commands heard after the “Jarvis” wake phrase.</p></div><label class="switch"><input id="speakReplies" type="checkbox" checked><span></span></label></div>
+      <div class="setting-block startup-setting"><div><label>Start with Windows</label><p>Add or remove a shortcut in your personal Windows Startup folder. No admin access required.</p></div><button id="startupButton" class="secondary-button" type="button">ENABLE STARTUP</button></div>
+      <div class="setup-note"><span>◇</span><p><strong>Local setup and privacy</strong><br>Install Ollama and Node.js, then run Setup-Local-AI.cmd once to download the Qwen model, Kokoro voices, and ready-made wake reply. Questions and camera images stay on this PC. While this window is visible, allow microphone access for http://127.0.0.1:48123 in Edge and allow desktop apps in Windows Privacy settings. Hiding the app releases that stream and hands listening to the Windows tray.</p></div>
+    </div>
+    <div class="dialog-footer"><button class="save-button" id="saveSettings" type="button">SAVE PREFERENCES</button></div>
+  </dialog>
+
+  <dialog id="infoDialog" class="info-dialog">
+    <form method="dialog" class="dialog-head"><div><span class="section-kicker">VOICE ACCESS</span><h2>About wake phrase</h2></div><button class="dialog-close" aria-label="Close">×</button></form>
+    <div class="settings-body info-copy"><p>When the app window is visible, it requests its own microphone stream for <strong>“Jarvis”</strong> listening. When you hide the app, it releases the mic and the tray takes over. Say “Jarvis” followed by a request, or say “Jarvis” and wait for “Yes, sir?” before giving your request.</p><p>Questions and camera images are processed by Qwen locally through Ollama. Say “open” followed by an app’s Start menu name to launch it, whether you are using the window or tray. For an installed Steam game, say “launch [game name] through Steam.” Web searches open in your browser. The app and tray coordinate so only one listens at a time.</p><p>Allow microphone access for http://127.0.0.1:48123 in Edge and for desktop apps in Windows Privacy settings. Install an English speech recognition language for tray listening. Use the J.A.R.V.I.S. tray menu to show the app or exit and stop listening.</p></div>
+    <div class="dialog-footer"><button class="save-button" type="button" id="closeInfo">UNDERSTOOD</button></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
