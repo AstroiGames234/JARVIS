@@ -7,6 +7,11 @@
   const messageInput = $('#messageInput');
   const settingsDialog = $('#settingsDialog');
   const infoDialog = $('#infoDialog');
+  const appShell = $('.app-shell');
+  const conversationPanel = $('#conversationPanel');
+  const cameraPanel = $('#cameraCard');
+  const voiceVisualizer = $('#voiceVisualizer');
+  const voiceVisualizerContext = voiceVisualizer?.getContext('2d');
   const LOCAL_MODEL = 'qwen3.5:2b';
   const KOKORO_VOICE_IDS = [24, 25, 26, 27];
   const storedVoiceId = Number(storageGet('jarvis.voiceId'));
@@ -14,7 +19,8 @@
   const settings = {
     model: LOCAL_MODEL,
     speak: voicePreferenceVersion === '2' ? storageGet('jarvis.speak') !== 'false' : true,
-    voiceId: KOKORO_VOICE_IDS.includes(storedVoiceId) ? storedVoiceId : 25
+    voiceId: KOKORO_VOICE_IDS.includes(storedVoiceId) ? storedVoiceId : 25,
+    fullscreen: storageGet('jarvis.fullscreen') !== 'false'
   };
   storageRemove('jarvis.geminiKey');
   storageSet('jarvis.model', LOCAL_MODEL);
@@ -34,12 +40,13 @@
   let foregroundHandoffReady = false;
   let foregroundListeningWanted = true;
   let foregroundListening = false;
+  let foregroundCommandInFlight = false;
   let foregroundRecognitionError = '';
-  let foregroundMicStream = null;
-  let foregroundMicRequest = null;
   let foregroundRecognitionStarting = false;
   let foregroundRetryDelay = 300;
+  let foregroundListenerPollInFlight = false;
   let restartTimer = null;
+  let foregroundStartWatchdogTimer = null;
   let foregroundCommandTimer = null;
   let mediaStream = null;
   let toastTimer = null;
@@ -50,6 +57,7 @@
   let activeSpeechFinish = null;
   let playbackContext = null;
   let playbackUnlockPromise = null;
+  let voiceVisualizerFrame = 0;
   let foregroundReportSequence = Date.now() * 1000;
 
   function toast(message, error = false) {
@@ -92,6 +100,71 @@
     else dialog.removeAttribute('open');
   }
 
+  function setWakeEdge(active) {
+    document.body.classList.toggle('wake-active', active);
+  }
+
+  function stopVoiceVisualization() {
+    if (voiceVisualizerFrame) cancelAnimationFrame(voiceVisualizerFrame);
+    voiceVisualizerFrame = 0;
+    appShell.classList.remove('voice-speaking');
+    if (voiceVisualizerContext && voiceVisualizer) {
+      voiceVisualizerContext.clearRect(0, 0, voiceVisualizer.width, voiceVisualizer.height);
+    }
+  }
+
+  function startVoiceVisualization(analyser) {
+    stopVoiceVisualization();
+    if (!analyser || !voiceVisualizerContext || !voiceVisualizer) return;
+    appShell.classList.add('voice-speaking');
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const context = voiceVisualizerContext;
+    const width = voiceVisualizer.width;
+    const height = voiceVisualizer.height;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const innerRadius = width * .32;
+    const bars = 80;
+    const draw = () => {
+      if (!speaking || !appShell.classList.contains('voice-speaking')) return;
+      analyser.getByteFrequencyData(data);
+      context.clearRect(0, 0, width, height);
+      context.lineCap = 'round';
+      for (let index = 0; index < bars; index += 1) {
+        const bin = Math.min(data.length - 1, 2 + Math.floor(index / bars * data.length * .38));
+        const strength = data[bin] / 255;
+        const length = 3 + strength * 45;
+        const angle = (index / bars) * Math.PI * 2 - Math.PI / 2;
+        const startX = centerX + Math.cos(angle) * innerRadius;
+        const startY = centerY + Math.sin(angle) * innerRadius;
+        const endX = centerX + Math.cos(angle) * (innerRadius + length);
+        const endY = centerY + Math.sin(angle) * (innerRadius + length);
+        context.strokeStyle = `rgba(104, 187, 255, ${.3 + strength * .7})`;
+        context.lineWidth = 1.5 + strength * 1.6;
+        context.beginPath();
+        context.moveTo(startX, startY);
+        context.lineTo(endX, endY);
+        context.stroke();
+      }
+      voiceVisualizerFrame = requestAnimationFrame(draw);
+    };
+    draw();
+  }
+
+  function setDockPanel(panel, button, open) {
+    const opening = open ?? panel.hidden;
+    if (opening) {
+      const otherPanel = panel === conversationPanel ? cameraPanel : conversationPanel;
+      const otherButton = panel === conversationPanel ? $('#cameraDockButton') : $('#chatDockButton');
+      if (!otherPanel.hidden) setDockPanel(otherPanel, otherButton, false);
+    }
+    panel.hidden = !opening;
+    if (!opening && panel === cameraPanel && mediaStream) stopCamera();
+    button?.setAttribute('aria-expanded', String(opening));
+    button?.classList.toggle('active', opening);
+    if (opening && panel === conversationPanel) setTimeout(() => messageInput.focus(), 0);
+  }
+
   function setCoreStatus(label, state = 'idle', hint = '') {
     $('#coreStatus').textContent = label;
     $('#coreDot').className = `status-dot${state === 'active' ? ' on' : state === 'warn' ? ' warn' : ''}`;
@@ -104,20 +177,27 @@
     const appOwnsMic = document.visibilityState === 'visible' && foregroundMicOwner;
     listening = appOwnsMic ? foregroundListening : backgroundVoiceReady;
     const enabled = appOwnsMic ? foregroundListeningWanted : backgroundVoiceReady;
+    const voiceAction = appOwnsMic && enabled
+      ? (foregroundListening || foregroundRecognitionStarting ? 'Pause voice listening' : 'Retry voice listening')
+      : (enabled ? 'Pause voice listening' : 'Resume voice listening');
     $('#listenBtn').classList.toggle('enabled', enabled);
     $('#listenBtn').setAttribute('aria-pressed', String(enabled));
+    $('#listenBtn').setAttribute('aria-label', voiceAction);
+    $('#listenBtn').title = voiceAction;
     if (appOwnsMic) {
-      $('#listenLabel').textContent = !foregroundHandoffReady || foregroundRecognitionStarting ? 'CONNECTING APP MICROPHONE' : foregroundListeningWanted ? 'LISTENING IN APP' : 'APP LISTENING PAUSED';
-      const hint = foregroundRecognitionError || (foregroundListening
+      $('#listenLabel').textContent = !foregroundHandoffReady ? 'WAITING FOR MICROPHONE' : foregroundRecognitionStarting ? 'CONNECTING APP MICROPHONE' : foregroundListening ? 'LISTENING IN APP' : foregroundListeningWanted ? 'RECONNECTING APP VOICE' : 'APP LISTENING PAUSED';
+      const hint = foregroundRecognitionError || (waitingForCommand
+        ? 'I am listening for your request now, sir.'
+        : foregroundListening
         ? 'The open app is listening directly for “Jarvis”, sir.'
         : !foregroundHandoffReady
           ? 'The app is waiting for the tray to release the microphone.'
           : foregroundRecognitionStarting
-            ? 'Connecting to the app microphone. Approve Edge’s microphone prompt if it appears, sir.'
+            ? 'Starting offline Whisper speech recognition, sir.'
             : foregroundListeningWanted
-              ? 'The app microphone is ready and will resume after I finish speaking.'
+              ? 'App voice is reconnecting and will resume listening automatically, sir.'
               : 'App voice is paused. Click the microphone button to resume listening.');
-      const appStatus = foregroundListening ? 'LISTENING FOR “JARVIS” IN APP' : foregroundRecognitionStarting ? 'CONNECTING MICROPHONE' : (pending || speaking) ? 'PROCESSING REQUEST' : 'APP VOICE PAUSED';
+      const appStatus = waitingForCommand ? 'AWAITING YOUR COMMAND' : foregroundListening ? 'LISTENING FOR “JARVIS” IN APP' : foregroundRecognitionStarting ? 'CONNECTING MICROPHONE' : (pending || speaking) ? 'PROCESSING REQUEST' : !foregroundListeningWanted ? 'APP VOICE PAUSED' : foregroundRecognitionError ? 'APP VOICE NEEDS ATTENTION' : !foregroundHandoffReady ? 'WAITING FOR MICROPHONE' : 'RESTARTING APP LISTENER';
       setCoreStatus(appStatus, foregroundListening ? 'active' : foregroundRecognitionError ? 'warn' : (pending || speaking) ? 'thinking' : 'idle', hint);
     } else if (backgroundVoiceReady && document.visibilityState === 'visible') {
       $('#listenLabel').textContent = 'TRAY LISTENING';
@@ -218,119 +298,62 @@
     else {
       reportForegroundOwnership(false);
       clearTimeout(restartTimer);
-      try { recognition?.abort(); } catch { /* The recognizer may already be stopped. */ }
+      clearTimeout(foregroundStartWatchdogTimer);
+      foregroundStartWatchdogTimer = null;
+      stopForegroundHelper();
       foregroundRecognitionStarting = false;
       foregroundListening = false;
-      releaseForegroundMicrophone();
     }
     updateVoiceButton();
   }
 
   function shouldRunForegroundRecognition() {
-    return foregroundMicOwner && foregroundHandoffReady && foregroundSpeechSupported && foregroundListeningWanted && !pending && !speaking && Boolean(recognition);
+    return foregroundMicOwner && foregroundHandoffReady && foregroundSpeechSupported && foregroundListeningWanted && !pending && !speaking && !foregroundCommandInFlight && Boolean(recognition);
   }
 
   function pauseForegroundRecognition() {
     clearTimeout(restartTimer);
-    if (!recognition) return;
-    try { recognition.stop(); } catch { /* It may already be stopping. */ }
+    clearTimeout(foregroundStartWatchdogTimer);
+    foregroundStartWatchdogTimer = null;
+    stopForegroundHelper();
+    foregroundRecognitionStarting = false;
     foregroundListening = false;
     updateVoiceButton();
   }
 
-  function releaseForegroundMicrophone() {
-    const stream = foregroundMicStream;
-    foregroundMicStream = null;
-    stream?.getTracks().forEach((track) => track.stop());
-  }
-
-  function microphoneErrorMessage(error) {
-    if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
-      return 'Allow microphone access for http://127.0.0.1:48123 in Edge, then click the microphone button to retry.';
-    }
-    if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
-      return 'No microphone is available. Connect or enable a microphone, then click the microphone button to retry.';
-    }
-    if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
-      return 'Edge could not open the microphone. Close other apps using it and check Windows microphone privacy settings.';
-    }
-    return `The app could not connect to the microphone${error?.message ? `: ${error.message}` : '.'}`;
-  }
-
-  async function requestForegroundMicrophone() {
-    const existingTrack = foregroundMicStream?.getAudioTracks().find((track) => track.readyState === 'live');
-    if (existingTrack) return existingTrack;
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('This Edge window cannot request microphone access. Open J.A.R.V.I.S. with the current Start-JARVIS.cmd launcher.');
-    }
-    if (!foregroundMicRequest) {
-      const request = navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false
-      });
-      foregroundMicRequest = request;
-    }
-    const request = foregroundMicRequest;
-    try {
-      const stream = await request;
-      if (!foregroundMicOwner || !foregroundListeningWanted || document.visibilityState !== 'visible') {
-        stream.getTracks().forEach((track) => track.stop());
-        return null;
-      }
-      const track = stream.getAudioTracks()[0];
-      if (!track) {
-        stream.getTracks().forEach((item) => item.stop());
-        throw new Error('No microphone audio track was returned.');
-      }
-      foregroundMicStream = stream;
-      track.addEventListener('ended', () => {
-        if (foregroundMicStream !== stream) return;
-        foregroundMicStream = null;
-        if (foregroundMicOwner && foregroundListeningWanted) {
-          foregroundRecognitionError = 'The microphone disconnected. Reconnect it and click the microphone button to retry.';
-          foregroundSpeechSupported = false;
-          setForegroundOwnership(false);
-          toast(foregroundRecognitionError, true);
-        }
-      }, { once: true });
-      return track;
-    } finally {
-      if (foregroundMicRequest === request) foregroundMicRequest = null;
-    }
-  }
-
-  function recognitionAcceptsAudioTrack() {
-    const version = navigator.userAgent.match(/(?:Edg|Chrome|Chromium)\/(\d+)/i)?.[1];
-    return Number(version || 0) >= 135;
-  }
-
-  function failForegroundRecognition(error) {
-    foregroundRecognitionStarting = false;
-    foregroundSpeechSupported = false;
-    foregroundRecognitionError = error instanceof DOMException || error?.name
-      ? microphoneErrorMessage(error)
-      : `The app could not start speech recognition: ${error?.message || 'unknown error'}`;
-    setForegroundOwnership(false);
-    updateVoiceButton();
-    toast(foregroundRecognitionError, true);
+  function stopForegroundHelper() {
+    return fetch('/api/foreground/listener/stop', { method: 'POST', keepalive: true }).catch(() => {});
   }
 
   async function startForegroundRecognition() {
     if (!shouldRunForegroundRecognition() || foregroundRecognitionStarting || foregroundListening) return;
     foregroundRecognitionStarting = true;
+    foregroundRecognitionError = '';
     updateVoiceButton();
-    let startInvoked = false;
     try {
-      const track = await requestForegroundMicrophone();
-      if (!track || !shouldRunForegroundRecognition() || !recognition) return;
-      if (recognitionAcceptsAudioTrack()) recognition.start(track);
-      else recognition.start();
-      startInvoked = true;
+      const response = await fetch('/api/foreground/listener/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: waitingForCommand ? 'command' : 'wake' })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || `Offline speech listener returned HTTP ${response.status}.`);
+      clearTimeout(foregroundStartWatchdogTimer);
+      foregroundStartWatchdogTimer = setTimeout(() => {
+        foregroundStartWatchdogTimer = null;
+        if (foregroundRecognitionStarting && foregroundListeningWanted && foregroundMicOwner) {
+          foregroundRecognitionStarting = false;
+          foregroundRecognitionError = 'Offline Whisper did not become ready. Run Setup-Local-AI.cmd if this is the first launch, then click the microphone button to retry.';
+          stopForegroundHelper();
+          updateVoiceButton();
+        }
+      }, 30_000);
     } catch (error) {
-      if (error?.name === 'InvalidStateError') return;
-      failForegroundRecognition(error);
-    } finally {
-      if (!startInvoked) foregroundRecognitionStarting = false;
+      foregroundRecognitionStarting = false;
+      foregroundListening = false;
+      foregroundRecognitionError = error.message || 'J.A.R.V.I.S. could not start offline speech recognition.';
+      updateVoiceButton();
+      toast(foregroundRecognitionError, true);
     }
   }
 
@@ -343,10 +366,67 @@
     foregroundRetryDelay = 300;
   }
 
+  async function pollForegroundListener() {
+    if (foregroundListenerPollInFlight || !foregroundMicOwner || document.visibilityState !== 'visible') return;
+    foregroundListenerPollInFlight = true;
+    try {
+      const eventResponse = await fetch('/api/foreground/listener/event', { cache: 'no-store' });
+      const eventData = eventResponse.ok ? await eventResponse.json() : {};
+      if (eventData.event) {
+        const event = eventData.event;
+        clearTimeout(foregroundStartWatchdogTimer);
+        foregroundStartWatchdogTimer = null;
+        foregroundRecognitionStarting = false;
+        foregroundListening = false;
+        if (event.kind === 'recognized') handleForegroundTranscript(event.text);
+        else if (event.kind === 'timeout' && event.mode === 'command' && waitingForCommand) {
+          waitingForCommand = false;
+          clearTimeout(foregroundCommandTimer);
+          setWakeEdge(false);
+          const prompt = 'I didn’t catch that, sir. Say Jarvis when you are ready.';
+          addMessage(prompt, 'ai');
+          speak(prompt).finally(() => resumeRecognition());
+        } else if (event.kind === 'timeout') resumeRecognition();
+        updateVoiceButton();
+        return;
+      }
+
+      const statusResponse = await fetch('/api/foreground/listener/status', { cache: 'no-store' });
+      if (!statusResponse.ok) return;
+      const status = await statusResponse.json();
+      if (status.running) {
+        foregroundRecognitionStarting = !status.listening;
+        if (status.listening) {
+          clearTimeout(foregroundStartWatchdogTimer);
+          foregroundStartWatchdogTimer = null;
+        }
+        foregroundListening = status.listening === true;
+        foregroundRecognitionError = status.error || '';
+      } else {
+        const hadListener = foregroundListening || foregroundRecognitionStarting;
+        foregroundListening = false;
+        foregroundRecognitionStarting = false;
+        if (status.error) foregroundRecognitionError = status.error;
+        else if (hadListener) foregroundRecognitionError = '';
+        if (!status.error && foregroundListeningWanted && !pending && !speaking && !foregroundCommandInFlight) resumeRecognition();
+      }
+      updateVoiceButton();
+    } catch {
+      // The native listener reports state through the local J.A.R.V.I.S. service.
+    } finally {
+      foregroundListenerPollInFlight = false;
+    }
+  }
+
   function dispatchForegroundCommand(text) {
+    foregroundCommandInFlight = true;
     Promise.resolve(handleCommand(text, 'voice'))
       .catch((error) => respond(`I could not complete that request, sir. ${error.message}`, true))
-      .finally(() => resumeRecognition());
+      .finally(() => {
+        foregroundCommandInFlight = false;
+        setWakeEdge(false);
+        resumeRecognition();
+      });
   }
 
   function handleForegroundTranscript(rawTranscript) {
@@ -359,8 +439,10 @@
       dispatchForegroundCommand(transcript);
       return;
     }
-    const wake = transcript.match(/^(?:hey\s+)?jarvis\b[\s,.:;!?-]*(.*)$/i);
+    // English speech engines can spell this name phonetically or as initials.
+    const wake = transcript.match(/^(?:(?:hey|hay|ay)\s+)?(?:jarvis|jervis|jarvus|jarviss|jarviz|jaarvis|jarvys|jarves|jarvies|jharvis|jarvish|javis|jarvy|jarvin|jarvee|jar\s+vis|jar\s+viz|j[\s.-]*a[\s.-]*r[\s.-]*v[\s.-]*i[\s.-]*s)\b[\s,.:;!?-]*(.*)$/i);
     if (!wake) return;
+    setWakeEdge(true);
     pauseForegroundRecognition();
     const command = wake[1].trim();
     if (command) {
@@ -369,83 +451,13 @@
       return;
     }
     waitingForCommand = true;
-    foregroundCommandTimer = setTimeout(() => {
-      if (!waitingForCommand) return;
-      waitingForCommand = false;
-      const prompt = 'I didn’t catch that, sir. Say Jarvis when you are ready.';
-      addMessage(prompt, 'ai');
-      speak(prompt).finally(() => resumeRecognition());
-    }, 12_000);
     addMessage('Yes, sir?', 'ai');
     toast('Wake phrase heard, sir. Listening for your request.');
     speak('Yes, sir?').finally(() => resumeRecognition());
   }
 
   function initializeForegroundRecognition() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (typeof SpeechRecognition !== 'function') {
-      foregroundSpeechSupported = false;
-      foregroundRecognitionError = 'This browser does not support direct app voice recognition. The tray listener can still listen in the background.';
-      setForegroundOwnership(false);
-      updateVoiceButton();
-      return false;
-    }
-
-    let instance;
-    try { instance = new SpeechRecognition(); }
-    catch (error) {
-      foregroundSpeechSupported = false;
-      foregroundRecognitionError = `The browser could not create a microphone listener: ${error.message}`;
-      setForegroundOwnership(false);
-      updateVoiceButton();
-      return false;
-    }
-    instance.lang = 'en-GB';
-    instance.continuous = true;
-    instance.interimResults = false;
-    instance.maxAlternatives = 1;
-    instance.onstart = () => {
-      if (recognition !== instance) return;
-      foregroundRecognitionStarting = false;
-      foregroundRecognitionError = '';
-      foregroundRetryDelay = 300;
-      foregroundListening = true;
-      updateVoiceButton();
-    };
-    instance.onresult = (event) => {
-      if (recognition !== instance || !foregroundMicOwner) return;
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        if (result.isFinal && result[0]?.transcript) handleForegroundTranscript(result[0].transcript);
-      }
-    };
-    instance.onerror = (event) => {
-      foregroundListening = false;
-      foregroundRecognitionStarting = false;
-      const error = event.error || 'unknown';
-      if (error === 'network') {
-        foregroundRecognitionError = 'Edge speech recognition lost its network connection; retrying, sir.';
-        foregroundRetryDelay = 2500;
-      } else if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(error)) {
-        foregroundSpeechSupported = false;
-        foregroundRecognitionError = error === 'not-allowed' || error === 'service-not-allowed'
-          ? 'Allow microphone access for http://127.0.0.1:48123 in Edge, then click the microphone button to retry.'
-          : error === 'audio-capture'
-            ? 'Edge received microphone permission but could not route audio to speech recognition. Check the selected Windows input device and close other microphone apps.'
-            : `Edge speech recognition is unavailable (${error}); the tray listener can take over.`;
-        setForegroundOwnership(false);
-        toast(foregroundRecognitionError, true);
-      }
-      updateVoiceButton();
-    };
-    instance.onend = () => {
-      if (recognition !== instance) return;
-      foregroundListening = false;
-      foregroundRecognitionStarting = false;
-      updateVoiceButton();
-      resumeRecognition();
-    };
-    recognition = instance;
+    recognition = { offlineWhisper: true };
     foregroundSpeechSupported = true;
     foregroundRecognitionError = '';
     setForegroundOwnership(document.visibilityState === 'visible');
@@ -458,6 +470,7 @@
     if (!visible) {
       clearTimeout(foregroundCommandTimer);
       waitingForCommand = false;
+      setWakeEdge(false);
       setForegroundOwnership(false);
       return;
     }
@@ -473,13 +486,32 @@
       return;
     }
     if (!foregroundSpeechSupported) {
-      if (recognition) { try { recognition.abort(); } catch { /* Already stopped. */ } }
       recognition = null;
       if (!initializeForegroundRecognition()) return;
     }
     foregroundListeningWanted = true;
+    foregroundRecognitionError = '';
     setForegroundOwnership(true);
     resumeRecognition();
+  }
+
+  function retryForegroundRecognition() {
+    if (document.visibilityState !== 'visible' || !foregroundSpeechSupported) return startListening();
+    foregroundListeningWanted = true;
+    foregroundRecognitionError = '';
+    clearTimeout(restartTimer);
+    clearTimeout(foregroundStartWatchdogTimer);
+    foregroundStartWatchdogTimer = null;
+    const stopped = stopForegroundHelper();
+    foregroundListening = false;
+    foregroundRecognitionStarting = false;
+    setForegroundOwnership(true);
+    updateVoiceButton();
+    stopped.finally(() => setTimeout(() => {
+      if (document.visibilityState !== 'visible' || !foregroundListeningWanted) return;
+      if (!recognition) initializeForegroundRecognition();
+      else resumeRecognition();
+    }, 300));
   }
 
   function stopListening() {
@@ -490,15 +522,17 @@
     foregroundListeningWanted = false;
     waitingForCommand = false;
     clearTimeout(foregroundCommandTimer);
+    setWakeEdge(false);
     pauseForegroundRecognition();
-    releaseForegroundMicrophone();
     setForegroundOwnership(true);
     updateVoiceButton();
   }
 
   function toggleForegroundListening() {
-    if (document.visibilityState === 'visible' && foregroundSpeechSupported && foregroundListeningWanted) stopListening();
-    else startListening();
+    if (document.visibilityState === 'visible' && foregroundSpeechSupported && foregroundListeningWanted) {
+      if (foregroundListening || foregroundRecognitionStarting) stopListening();
+      else retryForegroundRecognition();
+    } else startListening();
   }
 
   function spokenText(text) {
@@ -535,6 +569,7 @@
         finished = true;
         if (activeSpeechFinish === finish) activeSpeechFinish = null;
         if (objectUrl) URL.revokeObjectURL(objectUrl);
+        stopVoiceVisualization();
         if (!success) stopActiveSpeechAudio();
         speaking = false;
         resumeRecognition();
@@ -567,9 +602,14 @@
             const buffer = await playbackContext.decodeAudioData(await blob.arrayBuffer());
             if (finished) return;
             const source = playbackContext.createBufferSource();
+            const analyser = playbackContext.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = .72;
             activeSpeechSource = source;
             source.buffer = buffer;
-            source.connect(playbackContext.destination);
+            source.connect(analyser);
+            analyser.connect(playbackContext.destination);
+            startVoiceVisualization(analyser);
             source.onended = () => {
               if (activeSpeechSource === source) activeSpeechSource = null;
               $('#voiceOutputStatus').textContent = 'J.A.R.V.I.S. voice is ready.';
@@ -605,6 +645,7 @@
   }
 
   function respond(text, error = false) {
+    setWakeEdge(false);
     addMessage(text, 'ai', error);
     if (!error) speak(text);
   }
@@ -790,6 +831,7 @@
     $('#modelSelect').value = settings.model;
     $('#speakReplies').checked = settings.speak;
     $('#jarvisVoice').value = String(settings.voiceId);
+    $('#fullscreenEnabled').checked = settings.fullscreen;
     $('#startupButton').textContent = storageGet('jarvis.startup') === 'true' ? 'DISABLE STARTUP' : 'ENABLE STARTUP';
   }
 
@@ -811,6 +853,18 @@
       storageSet('jarvis.startup', String(Boolean(state.enabled)));
       $('#startupButton').textContent = state.enabled ? 'DISABLE STARTUP' : 'ENABLE STARTUP';
     } catch { /* The local server can still be used without reading startup state. */ }
+  }
+
+  async function syncFullscreenPreference() {
+    try {
+      const response = await fetch('/api/window/fullscreen', { cache: 'no-store' });
+      if (!response.ok) return;
+      const state = await response.json();
+      if (typeof state.enabled !== 'boolean') return;
+      settings.fullscreen = state.enabled;
+      storageSet('jarvis.fullscreen', String(settings.fullscreen));
+      $('#fullscreenEnabled').checked = settings.fullscreen;
+    } catch { /* The preference remains available from this Edge profile. */ }
   }
 
   async function syncLocalModelStatus() {
@@ -865,18 +919,40 @@
   }
 
   async function saveSettings() {
+    const previousFullscreen = settings.fullscreen;
     settings.model = LOCAL_MODEL;
     settings.speak = $('#speakReplies').checked;
     settings.voiceId = Number($('#jarvisVoice').value);
+    settings.fullscreen = $('#fullscreenEnabled').checked;
+    const fullscreenChanged = previousFullscreen !== settings.fullscreen;
     storageSet('jarvis.model', settings.model);
     storageSet('jarvis.speak', String(settings.speak));
     storageSet('jarvis.voiceId', String(settings.voiceId));
+    storageSet('jarvis.fullscreen', String(settings.fullscreen));
+    const fullscreenApply = applyFullscreenMode(settings.fullscreen);
     let voiceSyncWarning = '';
     try { await postJson('/api/voice/preference', { voiceId: settings.voiceId }); }
     catch (error) { voiceSyncWarning = `Voice saved for this window, sir. Background voice could not be updated: ${error.message}`; }
+    let fullscreenWarning = '';
+    try { await postJson('/api/window/fullscreen', { enabled: settings.fullscreen }); }
+    catch (error) { fullscreenWarning = `Fullscreen could not be saved for the next launch: ${error.message}`; }
+    const fullscreenApplied = await fullscreenApply;
+    if (settings.fullscreen && !fullscreenApplied) fullscreenWarning ||= 'Fullscreen is saved and will apply on the next launch.';
+    const fullscreenNotice = fullscreenChanged && !fullscreenWarning ? 'Fullscreen preference saved, sir. J.A.R.V.I.S. will use it when it next opens.' : '';
     updateModel();
     closeDialog(settingsDialog);
-    toast(voiceSyncWarning || 'Preferences saved, sir.', Boolean(voiceSyncWarning));
+    const message = [voiceSyncWarning, fullscreenWarning, fullscreenNotice].filter(Boolean).join(' ');
+    toast(message || 'Preferences saved, sir.', Boolean(voiceSyncWarning || fullscreenWarning));
+  }
+
+  function applyFullscreenMode(enabled) {
+    if (enabled) {
+      if (document.fullscreenElement) return Promise.resolve(true);
+      if (!document.documentElement.requestFullscreen) return Promise.resolve(false);
+      return document.documentElement.requestFullscreen().then(() => true).catch(() => false);
+    }
+    if (!document.fullscreenElement || !document.exitFullscreen) return Promise.resolve(true);
+    return document.exitFullscreen().then(() => true).catch(() => false);
   }
   function updateClock() {
     const now = new Date();
@@ -887,9 +963,16 @@
   $('#composerMic').addEventListener('click', () => { unlockAudioOutput(); startListening(); });
   document.addEventListener('pointerdown', unlockAudioOutput, { once: true, capture: true });
   document.addEventListener('keydown', unlockAudioOutput, { once: true, capture: true });
-  $('#typeBtn').addEventListener('click', () => messageInput.focus());
   $('#openSettings').addEventListener('click', showSettings);
   $('#topSettings').addEventListener('click', showSettings);
+  $('#settingsDockButton').addEventListener('click', showSettings);
+  $('#chatDockButton').addEventListener('click', () => setDockPanel(conversationPanel, $('#chatDockButton')));
+  $('#cameraDockButton').addEventListener('click', () => setDockPanel(cameraPanel, $('#cameraDockButton')));
+  $('#chatClose').addEventListener('click', () => setDockPanel(conversationPanel, $('#chatDockButton'), false));
+  $('#cameraClose').addEventListener('click', () => {
+    setDockPanel(cameraPanel, $('#cameraDockButton'), false);
+    if (mediaStream) stopCamera();
+  });
   $('#backgroundButton').addEventListener('click', async () => {
     try {
       await postJson('/api/background/hide', {});
@@ -933,7 +1016,7 @@
     }
   });
 
-  $('#cameraNav').addEventListener('click', () => $('#cameraCard').scrollIntoView({ behavior: 'smooth', block: 'center' }));
+  $('#cameraNav').addEventListener('click', () => setDockPanel(cameraPanel, $('#cameraDockButton'), true));
   $('#cameraToggle').addEventListener('click', () => mediaStream ? stopCamera() : startCamera());
   $('#cameraCapture').addEventListener('click', () => analyzeCamera('Describe what you can see in this camera image.'));
   document.querySelectorAll('.example-command').forEach((button) => button.addEventListener('click', () => {
@@ -960,7 +1043,13 @@
       event.preventDefault();
       showSettings();
     }
-    if (event.key === 'Escape' && document.visibilityState === 'visible' && foregroundMicOwner && foregroundListeningWanted && !settingsDialog.open && !infoDialog.open) stopListening();
+    if (event.key === 'Escape' && document.visibilityState === 'visible' && !settingsDialog.open && !infoDialog.open) {
+      if (!conversationPanel.hidden) setDockPanel(conversationPanel, $('#chatDockButton'), false);
+      else if (!cameraPanel.hidden) {
+        setDockPanel(cameraPanel, $('#cameraDockButton'), false);
+        if (mediaStream) stopCamera();
+      } else if (foregroundMicOwner && foregroundListeningWanted) stopListening();
+    }
   });
 
   document.addEventListener('visibilitychange', syncForegroundVisibility);
@@ -969,22 +1058,28 @@
     foregroundMicOwner = false;
     foregroundListening = false;
     clearTimeout(restartTimer);
+    clearTimeout(foregroundStartWatchdogTimer);
+    foregroundStartWatchdogTimer = null;
     clearTimeout(foregroundCommandTimer);
     waitingForCommand = false;
+    setWakeEdge(false);
+    stopVoiceVisualization();
     reportForegroundOwnership(false);
-    try { recognition?.abort(); } catch { /* The recognizer may already be stopped. */ }
-    releaseForegroundMicrophone();
+    stopForegroundHelper();
   });
   window.addEventListener('beforeunload', () => {
     foregroundListeningWanted = false;
     foregroundMicOwner = false;
     foregroundListening = false;
     clearTimeout(restartTimer);
+    clearTimeout(foregroundStartWatchdogTimer);
+    foregroundStartWatchdogTimer = null;
     clearTimeout(foregroundCommandTimer);
     waitingForCommand = false;
+    setWakeEdge(false);
+    stopVoiceVisualization();
     reportForegroundOwnership(false);
-    try { recognition?.abort(); } catch { /* The recognizer may already be stopped. */ }
-    releaseForegroundMicrophone();
+    stopForegroundHelper();
     stopCamera();
   });
 
@@ -994,12 +1089,15 @@
   syncForegroundVisibility();
   updateVoiceButton();
   setInterval(() => reportForegroundOwnership(foregroundMicOwner), 1500);
+  pollForegroundListener();
+  setInterval(pollForegroundListener, 300);
   syncBackgroundVoiceStatus();
   setInterval(syncBackgroundVoiceStatus, 4000);
   pollBackgroundSpeech();
   setInterval(pollBackgroundSpeech, 750);
   syncLocalModelStatus();
   syncStartupState();
+  syncFullscreenPreference();
   updateClock();
   setInterval(updateClock, 15_000);
 })();

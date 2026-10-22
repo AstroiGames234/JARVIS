@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#071117">
   <title>J.A.R.V.I.S. — Personal System</title>
+  <link rel="icon" href="/jarvis.ico" type="image/x-icon" sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256">
   <link rel="stylesheet" href="/app.css">
   <script src="/settings-fallback.js" defer></script>
   <script src="/app.js" defer></script>
@@ -45,7 +46,6 @@
         <div class="breadcrumbs"><span>PERSONAL SYSTEM</span><b>/</b><strong>ASSISTANT</strong></div>
         <div class="top-actions">
           <span class="model-chip"><i></i> LOCAL AI <span id="modelChip">QWEN3.5 2B LOCAL</span></span>
-          <button class="background-button" id="backgroundButton" type="button" title="Hide J.A.R.V.I.S. to the system tray"><span>↓</span> BACKGROUND</button>
           <button class="icon-button" id="topSettings" type="button" aria-label="Open preferences">⚙</button>
           <div class="avatar">S</div>
         </div>
@@ -66,20 +66,18 @@
             <div class="card-topline"><span class="section-kicker"><span class="pulse-mark"></span> JARVIS CORE</span><span class="secure-label"><span>◇</span> SESSION SECURE</span></div>
             <div class="orb-wrap" aria-hidden="true">
               <div class="orb-grid"></div><div class="orb-ring ring-a"></div><div class="orb-ring ring-b"></div><div class="orb-ring ring-c"></div>
-              <div class="orb-core"><span class="orb-center"></span><span class="orb-cross cross-v"></span><span class="orb-cross cross-h"></span></div>
+              <canvas class="voice-visualizer" id="voiceVisualizer" width="480" height="480"></canvas>
+              <div class="orb-core"><span class="orb-center"></span><span class="orb-title">JARVIS</span></div>
               <span class="orb-tick tick-a"></span><span class="orb-tick tick-b"></span><span class="orb-tick tick-c"></span><span class="orb-tick tick-d"></span>
             </div>
             <div class="core-status"><span id="coreDot" class="status-dot"></span><span id="coreStatus">SYSTEMS STANDING BY</span></div>
             <p class="core-hint" id="coreHint">Say <strong>“Jarvis”</strong> to wake me, sir.</p>
-            <div class="voice-controls">
-              <button class="listen-button" id="listenBtn" type="button"><span class="mic-icon">♩</span><span id="listenLabel">LISTENING IN BACKGROUND</span><span class="listen-light"></span></button>
-              <button class="quiet-button" id="typeBtn" type="button"><span>⌨</span> TYPE INSTEAD</button>
-            </div>
-            <div class="wake-note"><span class="wake-spark">✦</span><span>The app listens while open; the tray takes over when hidden.</span><button id="wakeInfo" aria-label="Wake word info">i</button></div>
+            <div class="voice-controls" aria-hidden="true"></div>
+          <div class="wake-note"><span class="wake-spark">✦</span><span>Offline Whisper listens in the app and tray; the tray takes over when hidden.</span><button id="wakeInfo" aria-label="Wake word info">i</button></div>
           </section>
 
-          <section class="conversation-card panel">
-            <div class="conversation-header"><div><div class="section-kicker">CONVERSATION</div><h2>Command log</h2></div><button class="clear-button" id="clearChat" title="Clear conversation">↺ <span>Clear</span></button></div>
+          <section class="conversation-card panel" id="conversationPanel" hidden aria-label="Chat with JARVIS">
+            <div class="conversation-header"><div><div class="section-kicker">CONVERSATION</div><h2>Command log</h2></div><div class="conversation-actions"><button class="clear-button" id="clearChat" title="Clear conversation">↺ <span>Clear</span></button><button class="dock-panel-close" id="chatClose" type="button" aria-label="Close chat">×</button></div></div>
             <div class="conversation-list" id="chatList" role="log" aria-live="polite" aria-relevant="additions">
               <div class="welcome-message" id="welcomeMessage">
                 <span class="welcome-mark">✧</span>
@@ -99,8 +97,8 @@
           </section>
 
           <aside class="right-column">
-            <section class="camera-card panel" id="cameraCard">
-              <div class="side-card-heading"><div><span class="section-kicker">VISUAL INPUT</span><h2>Camera lens</h2></div><span class="off-pill" id="cameraState">OFF</span></div>
+            <section class="camera-card panel" id="cameraCard" hidden aria-label="Camera controls">
+              <div class="side-card-heading"><div><span class="section-kicker">VISUAL INPUT</span><h2>Camera lens</h2></div><div class="conversation-actions"><span class="off-pill" id="cameraState">OFF</span><button class="dock-panel-close" id="cameraClose" type="button" aria-label="Close camera panel">×</button></div></div>
               <div class="camera-preview" id="cameraPreview">
                 <video id="cameraVideo" autoplay playsinline muted></video>
                 <div class="camera-empty" id="cameraEmpty"><span class="camera-lens-icon">◎</span><strong>Lens is closed</strong><small>Nothing is captured until you enable it.</small></div>
@@ -126,6 +124,16 @@
     </main>
   </div>
 
+  <nav class="app-dock" aria-label="J.A.R.V.I.S. app dock">
+    <button class="dock-control dock-listen" id="listenBtn" type="button" aria-label="Pause voice listening" title="Pause voice listening">
+      <span class="dock-icon mic-icon">♩</span><span id="listenLabel" class="sr-only">LISTENING IN BACKGROUND</span><span class="listen-light"></span>
+    </button>
+    <button class="dock-control" id="chatDockButton" type="button" aria-label="Open chat" aria-expanded="false" title="Open chat"><span class="dock-icon">▤</span><span class="dock-caption">CHAT</span></button>
+    <button class="dock-control" id="cameraDockButton" type="button" aria-label="Open camera controls" aria-expanded="false" title="Camera controls"><span class="dock-icon">◎</span><span class="dock-caption">CAMERA</span></button>
+    <button class="dock-control dock-background" id="backgroundButton" type="button" aria-label="Hide J.A.R.V.I.S. to the system tray" title="Hide to background"><span class="dock-icon">↓</span><span class="dock-caption">HIDE</span></button>
+    <button class="dock-control" id="settingsDockButton" type="button" aria-label="Open settings" title="Settings"><span class="dock-icon">⚙</span><span class="dock-caption">SETTINGS</span></button>
+  </nav>
+
   <dialog id="settingsDialog" class="settings-dialog">
     <form method="dialog" class="dialog-head"><div><span class="section-kicker">SYSTEM CONFIGURATION</span><h2>Preferences</h2></div><button class="dialog-close" aria-label="Close">×</button></form>
     <div class="settings-body">
@@ -135,15 +143,16 @@
       </div>
       <div class="setting-block"><label for="jarvisVoice">J.A.R.V.I.S. voice</label><select id="jarvisVoice"><option value="25">BM Fable · British male</option><option value="26">BM George · British male</option><option value="24">BM Daniel · British male</option><option value="27">BM Lewis · British male</option></select><div class="voice-test-row"><button id="testVoice" class="secondary-button" type="button">TEST SELECTED VOICE</button><span id="voiceOutputStatus" role="status">Try the British voices and choose the one you prefer.</span></div><p>Speech is generated on this PC without an internet connection or account after setup.</p></div>
       <div class="setting-block toggle-setting"><div><label for="speakReplies">Speak replies aloud</label><p>Applies to typed replies and commands heard after the “Jarvis” wake phrase.</p></div><label class="switch"><input id="speakReplies" type="checkbox" checked><span></span></label></div>
+      <div class="setting-block toggle-setting"><div><label for="fullscreenEnabled">Start in fullscreen</label><p>Choose whether new J.A.R.V.I.S. windows open fullscreen. Restart to apply a change.</p></div><label class="switch"><input id="fullscreenEnabled" type="checkbox" checked><span></span></label></div>
       <div class="setting-block startup-setting"><div><label>Start with Windows</label><p>Add or remove a shortcut in your personal Windows Startup folder. No admin access required.</p></div><button id="startupButton" class="secondary-button" type="button">ENABLE STARTUP</button></div>
-      <div class="setup-note"><span>◇</span><p><strong>Local setup and privacy</strong><br>Install Ollama and Node.js, then run Setup-Local-AI.cmd once to download the Qwen model, Kokoro voices, and ready-made wake reply. Questions and camera images stay on this PC. While this window is visible, allow microphone access for http://127.0.0.1:48123 in Edge and allow desktop apps in Windows Privacy settings. Hiding the app releases that stream and hands listening to the Windows tray.</p></div>
+      <div class="setup-note"><span>◇</span><p><strong>Local setup and privacy</strong><br>Install Ollama and Node.js, then run Setup-Local-AI.cmd once to download the Qwen model, offline Whisper speech recognition, Kokoro voices, and ready-made wake reply. The speech model adds about 160 MB. Questions, microphone audio, and camera images are processed on this PC. Allow desktop apps to use your microphone in Windows Privacy settings. The app uses its local Whisper recognizer while visible; hiding it hands listening to the tray.</p></div>
     </div>
     <div class="dialog-footer"><button class="save-button" id="saveSettings" type="button">SAVE PREFERENCES</button></div>
   </dialog>
 
   <dialog id="infoDialog" class="info-dialog">
     <form method="dialog" class="dialog-head"><div><span class="section-kicker">VOICE ACCESS</span><h2>About wake phrase</h2></div><button class="dialog-close" aria-label="Close">×</button></form>
-    <div class="settings-body info-copy"><p>When the app window is visible, it requests its own microphone stream for <strong>“Jarvis”</strong> listening. When you hide the app, it releases the mic and the tray takes over. Say “Jarvis” followed by a request, or say “Jarvis” and wait for “Yes, sir?” before giving your request.</p><p>Questions and camera images are processed by Qwen locally through Ollama. Say “open” followed by an app’s Start menu name to launch it, whether you are using the window or tray. For an installed Steam game, say “launch [game name] through Steam.” Web searches open in your browser. The app and tray coordinate so only one listens at a time.</p><p>Allow microphone access for http://127.0.0.1:48123 in Edge and for desktop apps in Windows Privacy settings. Install an English speech recognition language for tray listening. Use the J.A.R.V.I.S. tray menu to show the app or exit and stop listening.</p></div>
+      <div class="settings-body info-copy"><p>When the app window is visible, J.A.R.V.I.S. uses offline Whisper speech recognition to hear <strong>“Jarvis”</strong> and your request. When you hide the app, it releases the mic and the tray takes over. Say “Jarvis” followed by a request, or say “Jarvis” and wait for “Yes, sir?” before giving your request.</p><p>Questions and camera images are processed by Qwen locally through Ollama. Say “open” followed by an app’s Start menu name to launch it, whether you are using the window or tray. For an installed Steam game, say “launch [game name] through Steam.” Web searches open in your browser. The app and tray coordinate so only one listens at a time.</p><p>Allow desktop apps to use your microphone in Windows Privacy settings. Use the J.A.R.V.I.S. tray menu to show the app or exit and stop listening.</p></div>
     <div class="dialog-footer"><button class="save-button" type="button" id="closeInfo">UNDERSTOOD</button></div>
   </dialog>
 

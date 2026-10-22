@@ -17,7 +17,7 @@
     }
   };
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('#openSettings, #topSettings')) return;
+    if (!event.target.closest('#openSettings, #topSettings, #settingsDockButton')) return;
     event.preventDefault();
     openSettings();
     if (window.jarvisAppReady) return;
@@ -25,6 +25,8 @@
     const speak = document.querySelector('#speakReplies');
     if (model) model.value = 'qwen3.5:2b';
     if (speak) speak.checked = get('jarvis.speak', 'true') !== 'false';
+    const fullscreen = document.querySelector('#fullscreenEnabled');
+    if (fullscreen) fullscreen.checked = get('jarvis.fullscreen', 'true') !== 'false';
     const button = document.querySelector('#startupButton');
     if (button) button.textContent = get('jarvis.startup') === 'true' ? 'DISABLE STARTUP' : 'ENABLE STARTUP';
   }, true);
@@ -33,6 +35,11 @@
     if (!event.target.closest('#saveSettings') || window.jarvisAppReady) return;
     event.preventDefault();
     set('jarvis.speak', String(document.querySelector('#speakReplies')?.checked !== false));
+    const fullscreen = document.querySelector('#fullscreenEnabled')?.checked !== false;
+    set('jarvis.fullscreen', String(fullscreen));
+    fetch('/api/window/fullscreen', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: fullscreen }) }).catch(() => {});
+    if (fullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    else if (!fullscreen && document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
     const panel = dialog();
     if (typeof panel?.close === 'function' && panel.open) panel.close();
     else panel?.removeAttribute('open');

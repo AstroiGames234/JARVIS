@@ -16,6 +16,8 @@ $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $wscriptPath
 $shortcut.Arguments = '"' + $launcherPath + '"'
 $shortcut.WorkingDirectory = $PSScriptRoot
+$iconPath = Join-Path $PSScriptRoot 'jarvis.ico'
+if (Test-Path -LiteralPath $iconPath) { $shortcut.IconLocation = "$iconPath,0" }
 $shortcut.Description = 'Start J.A.R.V.I.S. Personal System when you sign in'
 $shortcut.Save()
 Write-Output 'J.A.R.V.I.S. will start when you sign in to Windows.'

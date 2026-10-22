@@ -15,7 +15,19 @@ const LOCAL_AI_URL = 'http://127.0.0.1:11434';
 const LOCAL_VOICE_ROOT = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'JARVIS', 'voice');
 const LOCAL_VOICE_PACKAGE = path.join(LOCAL_VOICE_ROOT, 'node_modules', 'sherpa-onnx-node');
 const KOKORO_ROOT = path.join(LOCAL_VOICE_ROOT, 'kokoro-multi-lang-v1_0');
+const LOCAL_ASR_ROOT = path.join(LOCAL_VOICE_ROOT, 'whisper-base.en');
+const ASR_ENCODER = path.join(LOCAL_ASR_ROOT, 'base.en-encoder.int8.onnx');
+const ASR_DECODER = path.join(LOCAL_ASR_ROOT, 'base.en-decoder.int8.onnx');
+const ASR_TOKENS = path.join(LOCAL_ASR_ROOT, 'base.en-tokens.txt');
+const ASR_VAD = path.join(LOCAL_ASR_ROOT, 'silero_vad.onnx');
+const VAD_MIN_SPEECH_SECONDS = 0.08;
+const VAD_MIN_SILENCE_SECONDS = 0.2;
+const VAD_SPEECH_END_DELAY_MS = 300;
+const VAD_INTER_SEGMENT_SILENCE_SAMPLES = 1600;
+const ASR_MIN_UTTERANCE_SAMPLES = 1600;
+const ASR_MAX_UTTERANCE_SAMPLES = 16_000 * 30;
 const VOICE_PREFERENCE_FILE = path.join(LOCAL_VOICE_ROOT, 'voice-preference.json');
+const WINDOW_PREFERENCE_FILE = path.join(path.dirname(LOCAL_VOICE_ROOT), 'window-preference.json');
 const KOKORO_VOICE_IDS = new Set([24, 25, 26, 27]);
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -24,9 +36,16 @@ const MIME = {
   '.svg': 'image/svg+xml; charset=utf-8',
   '.ico': 'image/x-icon'
 };
-const PUBLIC_FILES = new Set(['index.html', 'app.css', 'app.js', 'settings-fallback.js']);
+const PUBLIC_FILES = new Set(['index.html', 'app.css', 'app.js', 'settings-fallback.js', 'jarvis.ico']);
 let backgroundVoice = { ready: false, message: 'Waiting for the Windows tray listener.', available: false, foregroundPaused: false };
 let foregroundVoice = { active: false, updatedAt: 0, sequence: -1 };
+let foregroundMicSession = null;
+let foregroundListenerGeneration = 0;
+let foregroundListenerOwner = '';
+let localAsrEnginePromise = null;
+let foregroundTranscriptionQueue = Promise.resolve();
+let foregroundListenerStatus = { running: false, listening: false, mode: '', error: '' };
+let foregroundListenerEvent = null;
 let backgroundSpeech = null;
 let backgroundSpeechSequence = 0;
 let localSpeechEngine = null;
@@ -68,6 +87,312 @@ function rejectForeignOrigin(req, res) {
     return true;
   }
   return false;
+}
+
+function closeForegroundMicSession(session) {
+  if (!session) return;
+  clearTimeout(session.commandTimeout);
+  clearTimeout(session.utteranceTimer);
+  try {
+    const closing = session.stream?.close();
+    if (closing && typeof closing.catch === 'function') void closing.catch(() => {});
+  } catch { /* The stream may have already stopped. */ }
+}
+
+function stopForegroundListener({ clearEvent = true } = {}) {
+  foregroundListenerGeneration += 1;
+  const session = foregroundMicSession;
+  foregroundMicSession = null;
+  foregroundListenerOwner = '';
+  foregroundListenerStatus = { running: false, listening: false, mode: '', error: '' };
+  if (clearEvent) foregroundListenerEvent = null;
+  closeForegroundMicSession(session);
+}
+
+function startVoiceListener(mode, owner) {
+  const appOwnsMic = foregroundVoice.active && Date.now() - foregroundVoice.updatedAt < 5000;
+  if (owner === 'app' && !appOwnsMic) {
+    const error = new Error('The app must own the microphone before foreground listening can start.');
+    error.status = 409;
+    throw error;
+  }
+  if (owner === 'tray' && appOwnsMic) {
+    const error = new Error('The app window currently owns the microphone.');
+    error.status = 409;
+    throw error;
+  }
+  if (foregroundListenerStatus.running && foregroundListenerStatus.mode === mode && foregroundListenerOwner === owner) {
+    return { ok: true, running: true };
+  }
+  stopForegroundListener();
+  const generation = foregroundListenerGeneration;
+  foregroundListenerOwner = owner;
+  foregroundListenerEvent = null;
+  foregroundListenerStatus = { running: true, listening: false, mode, error: '' };
+  void openForegroundMicSession(mode, generation, owner).catch((error) => {
+    if (generation !== foregroundListenerGeneration) return;
+    stopForegroundListener();
+    foregroundListenerStatus = {
+      running: false,
+      listening: false,
+      mode,
+      error: error.message || 'The offline speech recognizer could not start.'
+    };
+  });
+  return { ok: true, running: true };
+}
+
+function startForegroundListener(mode) {
+  return startVoiceListener(mode, 'app');
+}
+
+function startBackgroundListener(mode) {
+  return startVoiceListener(mode, 'tray');
+}
+
+async function loadLocalAsrEngine() {
+  if (localAsrEnginePromise) return localAsrEnginePromise;
+  localAsrEnginePromise = (async () => {
+    for (const file of [ASR_ENCODER, ASR_DECODER, ASR_TOKENS, ASR_VAD]) {
+      if (!fs.existsSync(file)) {
+        throw new Error('Offline Whisper speech recognition is not installed. Run Setup-Local-AI.cmd, then restart J.A.R.V.I.S.');
+      }
+    }
+    let sherpa;
+    try { sherpa = require(LOCAL_VOICE_PACKAGE); }
+    catch (error) {
+      throw new Error(`The offline speech engine is unavailable. Run Setup-Local-AI.cmd. ${error.message || ''}`.trim());
+    }
+    const recognizer = await sherpa.OfflineRecognizer.createAsync({
+      featConfig: { sampleRate: 16000, featureDim: 80 },
+      modelConfig: {
+        whisper: { encoder: ASR_ENCODER, decoder: ASR_DECODER, language: 'en', task: 'transcribe' },
+        tokens: ASR_TOKENS,
+        numThreads: Math.max(2, Math.min(8, Math.floor((os.cpus().length || 2) * 0.75))),
+        provider: 'cpu',
+        debug: false
+      }
+    });
+    return { sherpa, recognizer };
+  })().catch((error) => {
+    localAsrEnginePromise = null;
+    throw error;
+  });
+  return localAsrEnginePromise;
+}
+
+function convertMicSamplesToMono(data, format, formats, channels) {
+  if (![formats.F32, formats.F64, formats.I8, formats.I16, formats.I24,
+    formats.I32, formats.I64, formats.U8, formats.U16, formats.U24,
+    formats.U32, formats.U64].includes(format)) {
+    throw new Error('This microphone uses an audio format that the local recognizer cannot read. Choose a standard Windows microphone device.');
+  }
+  const frames = Math.floor(data.length / channels);
+  const mono = new Float32Array(frames);
+  for (let frame = 0; frame < frames; frame += 1) {
+    let value = 0;
+    for (let channel = 0; channel < channels; channel += 1) {
+      const sample = data[frame * channels + channel];
+      if (format === formats.F32 || format === formats.F64) value += sample;
+      else if (format === formats.I8) value += sample / 128;
+      else if (format === formats.I16) value += sample / 32768;
+      else if (format === formats.I24) value += sample / 8388608;
+      else if (format === formats.I32) value += sample / 2147483648;
+      else if (format === formats.I64) value += Number(sample) / 9223372036854775808;
+      else if (format === formats.U8) value += (sample - 128) / 128;
+      else if (format === formats.U16) value += (sample - 32768) / 32768;
+      else if (format === formats.U24) value += (sample - 8388608) / 8388608;
+      else if (format === formats.U32) value += (sample - 2147483648) / 2147483648;
+      else if (format === formats.U64) value += (Number(sample) - 9223372036854775808) / 9223372036854775808;
+    }
+    mono[frame] = Math.max(-1, Math.min(1, value / channels));
+  }
+  return mono;
+}
+
+function mergeSpeechSegments(segments, sampleCount) {
+  const joined = new Float32Array(sampleCount + Math.max(0, segments.length - 1) * VAD_INTER_SEGMENT_SILENCE_SAMPLES);
+  let offset = 0;
+  for (let index = 0; index < segments.length; index += 1) {
+    joined.set(segments[index], offset);
+    offset += segments[index].length;
+    if (index < segments.length - 1) offset += VAD_INTER_SEGMENT_SILENCE_SAMPLES;
+  }
+  return joined;
+}
+
+function resetBackgroundCommandTimeout(session) {
+  if (!session || session.owner !== 'tray' || session.mode !== 'command') return;
+  clearTimeout(session.commandTimeout);
+  session.commandTimeout = setTimeout(() => {
+    if (session.generation !== foregroundListenerGeneration) return;
+    stopForegroundListener({ clearEvent: false });
+    foregroundListenerEvent = { kind: 'timeout', text: '', mode: 'command' };
+  }, 30_000);
+  session.commandTimeout.unref?.();
+}
+
+function queueForegroundUtteranceSegment(segment, mode, generation) {
+  const session = foregroundMicSession;
+  if (generation !== foregroundListenerGeneration || !session || session.generation !== generation || !segment.length) return;
+  session.utteranceSegments.push(Float32Array.from(segment));
+  session.utteranceSampleCount += segment.length;
+  clearTimeout(session.utteranceTimer);
+  session.utteranceTimer = setTimeout(() => {
+    session.utteranceTimer = null;
+    if (generation !== foregroundListenerGeneration || foregroundMicSession !== session) return;
+    const segments = session.utteranceSegments;
+    const sampleCount = session.utteranceSampleCount;
+    session.utteranceSegments = [];
+    session.utteranceSampleCount = 0;
+    const samples = mergeSpeechSegments(segments, sampleCount);
+    if (samples.length < ASR_MIN_UTTERANCE_SAMPLES || samples.length > ASR_MAX_UTTERANCE_SAMPLES) return;
+    void transcribeForegroundSegment(samples, mode, generation);
+  }, VAD_SPEECH_END_DELAY_MS);
+  session.utteranceTimer.unref?.();
+}
+
+async function transcribeForegroundSegment(samples, mode, generation) {
+  if (generation !== foregroundListenerGeneration || samples.length < ASR_MIN_UTTERANCE_SAMPLES || samples.length > ASR_MAX_UTTERANCE_SAMPLES) return;
+  foregroundTranscriptionQueue = foregroundTranscriptionQueue.then(async () => {
+    if (generation !== foregroundListenerGeneration) return;
+    const { recognizer } = await loadLocalAsrEngine();
+    const stream = recognizer.createStream();
+    stream.acceptWaveform({ samples, sampleRate: 16000 });
+    await recognizer.decodeAsync(stream);
+    if (generation !== foregroundListenerGeneration) return;
+    const text = String(recognizer.getResult(stream)?.text || '').trim().replace(/\s+/g, ' ');
+    if (!text) return;
+    if (mode === 'wake' && !/^(?:(?:hey|hay|ay)\s+)?(?:jarvis|jervis|jarvus|jarviss|jarviz|jaarvis|jarvys|jarves|jarvies|jharvis|jarvish|javis|jarvy|jarvin|jarvee|jar\s+vis|jar\s+viz|j\s*[.-]?\s*a\s*[.-]?\s*r\s*[.-]?\s*v\s*[.-]?\s*i\s*[.-]?\s*s)\b/i.test(text)) return;
+    if (generation !== foregroundListenerGeneration) return;
+    stopForegroundListener({ clearEvent: false });
+    foregroundListenerEvent = { kind: 'recognized', text, mode };
+  }).catch((error) => {
+    if (generation !== foregroundListenerGeneration) return;
+    stopForegroundListener();
+    foregroundListenerStatus = { running: false, listening: false, mode, error: `Offline speech recognition stopped. ${error.message || ''}`.trim() };
+  });
+  await foregroundTranscriptionQueue;
+}
+
+async function openForegroundMicSession(mode, generation, owner) {
+  const { sherpa } = await loadLocalAsrEngine();
+  if (generation !== foregroundListenerGeneration) return;
+  let cpal;
+  try { cpal = require(path.join(LOCAL_VOICE_ROOT, 'node_modules', 'node-cpal')); }
+  catch (error) {
+    throw new Error(`The local microphone driver is unavailable. Run Setup-Local-AI.cmd. ${error.message || ''}`.trim());
+  }
+  const audio = cpal.convenience;
+  if (!audio?.getDefaultInputDevice || !audio?.getDefaultInputConfig || !audio?.createInputStream) {
+    throw new Error('The local microphone driver does not support queued audio capture. Run Setup-Local-AI.cmd to update it.');
+  }
+  let device;
+  let defaultConfig;
+  try {
+    device = audio.getDefaultInputDevice();
+    if (device) defaultConfig = audio.getDefaultInputConfig(device.deviceId);
+  } catch (error) {
+    throw new Error(`Windows could not open the default microphone. ${error.message || ''}`.trim());
+  }
+  if (!device) {
+    throw new Error('Windows did not report a default microphone. Check microphone privacy settings and select a default input device.');
+  }
+  let stream;
+  try {
+    const channels = defaultConfig.channels;
+    const nativeSampleRate = defaultConfig.sampleRate;
+    const formatName = String(defaultConfig.sampleFormat || '').toUpperCase();
+    const sampleFormat = cpal.SampleFormat?.[formatName];
+    const formats = cpal.SampleFormat;
+    if (!channels || !nativeSampleRate || !sampleFormat || sampleFormat.isDsd?.()) throw new Error('The default microphone has an unsupported audio configuration.');
+    const vad = new sherpa.Vad({
+      sileroVad: { model: ASR_VAD, threshold: 0.42, minSpeechDuration: VAD_MIN_SPEECH_SECONDS, minSilenceDuration: VAD_MIN_SILENCE_SECONDS, maxSpeechDuration: 20, windowSize: 512 },
+      tenVad: { model: '', threshold: 0.42, minSpeechDuration: VAD_MIN_SPEECH_SECONDS, minSilenceDuration: VAD_MIN_SILENCE_SECONDS, maxSpeechDuration: 20, windowSize: 256 },
+      sampleRate: 16000,
+      debug: false,
+      numThreads: 1
+    }, 30);
+    const resampler = new sherpa.LinearResampler(nativeSampleRate, 16000);
+    const input = new sherpa.CircularBuffer(16000 * 2);
+    const windowSize = 512;
+    let session = {
+      generation,
+      owner,
+      mode,
+      utteranceSegments: [],
+      utteranceSampleCount: 0,
+      utteranceTimer: null,
+      commandTimeout: null,
+      vadDetected: false
+    };
+    const processAudio = (data) => {
+      if (!session || generation !== foregroundListenerGeneration) return;
+      try {
+        const mono = convertMicSamplesToMono(data, sampleFormat, cpal.SampleFormat, channels);
+        const resampled = resampler.resample(mono);
+        input.push(resampled);
+        while (input.size() >= windowSize) {
+          const window = input.get(input.head(), windowSize);
+          input.pop(windowSize);
+          vad.acceptWaveform(window);
+          const speechDetected = vad.isDetected();
+          if (speechDetected) {
+            if (!session.vadDetected) resetBackgroundCommandTimeout(session);
+            session.vadDetected = true;
+            if (session.utteranceTimer) {
+              clearTimeout(session.utteranceTimer);
+              session.utteranceTimer = null;
+            }
+          } else {
+            session.vadDetected = false;
+          }
+          while (!vad.isEmpty()) {
+            const segment = vad.front();
+            const samples = Float32Array.from(segment.samples);
+            vad.pop();
+            queueForegroundUtteranceSegment(samples, mode, generation);
+          }
+        }
+      } catch (error) {
+        stopForegroundListener();
+        foregroundListenerStatus = { running: false, listening: false, mode, error: `The local microphone audio could not be processed. ${error.message || ''}`.trim() };
+      }
+    };
+    // Keep conversion and VAD off CPAL's real-time callback so brief Node delays do not stop capture.
+    stream = await audio.createInputStream({
+      deviceId: device.deviceId,
+      config: {
+        sampleRate: nativeSampleRate,
+        channels,
+        sampleFormat: defaultConfig.sampleFormat,
+        bufferSize: defaultConfig.bufferSize
+      },
+      queueCapacityBuffers: 64,
+      onData: processAudio,
+      onError: (error) => {
+        if (generation !== foregroundListenerGeneration) return;
+        // WASAPI may report a recoverable XRUN while continuing to deliver input buffers.
+        if (error.code === 'XRUN') return;
+        stopForegroundListener();
+        foregroundListenerStatus = { running: false, listening: false, mode, error: `The microphone stream stopped. ${error.message || ''}`.trim() };
+      }
+    });
+    session.stream = stream;
+    session.commandTimeout = null;
+    if (generation !== foregroundListenerGeneration) {
+      closeForegroundMicSession(session);
+      return;
+    }
+    foregroundMicSession = session;
+    stream.play();
+    resetBackgroundCommandTimeout(session);
+    foregroundListenerStatus = { running: true, listening: true, mode, error: '' };
+  } catch (error) {
+    if (foregroundMicSession && foregroundMicSession.stream === stream) foregroundMicSession = null;
+    if (stream) closeForegroundMicSession({ stream });
+    throw new Error(`Could not open the Windows microphone. ${error.message || ''}`.trim());
+  }
 }
 
 function readJson(req) {
@@ -510,6 +835,24 @@ function savePreferredVoice(value) {
   return voiceId;
 }
 
+function readFullscreenPreference() {
+  try {
+    const value = JSON.parse(fs.readFileSync(WINDOW_PREFERENCE_FILE, 'utf8')).fullscreen;
+    return typeof value === 'boolean' ? value : true;
+  } catch { return true; }
+}
+
+function saveFullscreenPreference(value) {
+  if (typeof value !== 'boolean') throw Object.assign(new Error('Fullscreen preference must be enabled or disabled.'), { status: 400 });
+  try {
+    fs.mkdirSync(path.dirname(WINDOW_PREFERENCE_FILE), { recursive: true });
+    fs.writeFileSync(WINDOW_PREFERENCE_FILE, JSON.stringify({ fullscreen: value }), 'utf8');
+  } catch (error) {
+    throw Object.assign(new Error(`Fullscreen preference could not be saved. ${error.message}`), { status: 500 });
+  }
+  return value;
+}
+
 function sendAudio(res, audio) {
   res.writeHead(200, {
     'Content-Type': 'audio/wav',
@@ -544,21 +887,108 @@ const server = http.createServer(async (req, res) => {
   if (req.url === '/api/startup/status' && req.method === 'GET') {
     return send(res, 200, { enabled: fs.existsSync(STARTUP_SHORTCUT) });
   }
+  if (req.url === '/api/window/fullscreen' && req.method === 'GET') {
+    return send(res, 200, { enabled: readFullscreenPreference() });
+  }
+  if (req.url === '/api/window/fullscreen' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      return send(res, 200, { ok: true, enabled: saveFullscreenPreference(body.enabled) });
+    } catch (error) {
+      return send(res, error.status || 400, { error: error.message });
+    }
+  }
   if (req.url === '/api/background/status' && req.method === 'GET') {
     return send(res, 200, backgroundVoice);
   }
   if (req.url === '/api/foreground/status' && req.method === 'GET') {
-    return send(res, 200, { active: foregroundVoice.active && Date.now() - foregroundVoice.updatedAt < 5000 });
+    const active = foregroundVoice.active && Date.now() - foregroundVoice.updatedAt < 5000;
+    if (active && foregroundListenerOwner === 'tray') stopForegroundListener();
+    else if (!active && foregroundListenerOwner === 'app') stopForegroundListener();
+    return send(res, 200, { active });
   }
   if (req.url === '/api/foreground/status' && req.method === 'POST') {
     try {
       const body = await readJson(req);
       const sequence = Number.isSafeInteger(body.sequence) ? body.sequence : foregroundVoice.sequence + 1;
-      if (sequence >= foregroundVoice.sequence) foregroundVoice = { active: body.active === true, updatedAt: Date.now(), sequence };
+      if (sequence >= foregroundVoice.sequence) {
+        foregroundVoice = { active: body.active === true, updatedAt: Date.now(), sequence };
+        if ((foregroundVoice.active && foregroundListenerOwner === 'tray') || (!foregroundVoice.active && foregroundListenerOwner === 'app')) stopForegroundListener();
+      }
       return send(res, 200, { ok: true });
     } catch (error) {
       return send(res, error.status || 400, { error: error.message });
     }
+  }
+  if (req.url === '/api/foreground/listener/status' && req.method === 'GET') {
+    return send(res, 200, foregroundListenerStatus);
+  }
+  if (req.url === '/api/background/listener/status' && req.method === 'GET') {
+    return send(res, 200, foregroundListenerStatus);
+  }
+  if (req.url === '/api/foreground/listener/status' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      foregroundListenerStatus = {
+        running: body.running === true,
+        listening: body.listening === true,
+        mode: ['wake', 'command'].includes(body.mode) ? body.mode : '',
+        error: typeof body.error === 'string' ? body.error.trim().slice(0, 300) : ''
+      };
+      return send(res, 200, { ok: true });
+    } catch (error) {
+      return send(res, error.status || 400, { error: error.message });
+    }
+  }
+  if (req.url === '/api/foreground/listener/event' && req.method === 'GET') {
+    const event = foregroundListenerEvent;
+    foregroundListenerEvent = null;
+    return send(res, 200, { event });
+  }
+  if (req.url === '/api/background/listener/event' && req.method === 'GET') {
+    const event = foregroundListenerEvent;
+    foregroundListenerEvent = null;
+    return send(res, 200, { event });
+  }
+  if (req.url === '/api/foreground/listener/event' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      if (!['recognized', 'timeout'].includes(body.kind)) return send(res, 400, { error: 'Unknown foreground speech event.' });
+      foregroundListenerEvent = {
+        kind: body.kind,
+        text: typeof body.text === 'string' ? body.text.trim().slice(0, 1000) : '',
+        mode: ['wake', 'command'].includes(body.mode) ? body.mode : ''
+      };
+      return send(res, 200, { ok: true });
+    } catch (error) {
+      return send(res, error.status || 400, { error: error.message });
+    }
+  }
+  if (req.url === '/api/foreground/listener/start' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      if (!['wake', 'command'].includes(body.mode)) return send(res, 400, { error: 'Choose wake or command listening.' });
+      return send(res, 202, startForegroundListener(body.mode));
+    } catch (error) {
+      return send(res, error.status || 500, { error: error.message });
+    }
+  }
+  if (req.url === '/api/background/listener/start' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      if (!['wake', 'command'].includes(body.mode)) return send(res, 400, { error: 'Choose wake or command listening.' });
+      return send(res, 202, startBackgroundListener(body.mode));
+    } catch (error) {
+      return send(res, error.status || 500, { error: error.message });
+    }
+  }
+  if (req.url === '/api/foreground/listener/stop' && req.method === 'POST') {
+    stopForegroundListener();
+    return send(res, 200, { ok: true });
+  }
+  if (req.url === '/api/background/listener/stop' && req.method === 'POST') {
+    if (foregroundListenerOwner === 'tray') stopForegroundListener();
+    return send(res, 200, { ok: true });
   }
   if (req.url === '/api/voice/preference' && req.method === 'POST') {
     try {
@@ -704,6 +1134,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && req.url === '/api/shutdown') {
+    stopForegroundListener();
     send(res, 200, { ok: true });
     setTimeout(() => {
       server.close(() => process.exit(0));
@@ -747,7 +1178,11 @@ function launchWindow() {
   ];
   const edge = edgePaths.find((candidate) => candidate && fs.existsSync(candidate));
   try {
-    if (edge) spawn(edge, [`--app=${url}`, '--new-window'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    if (edge) {
+      const args = [`--app=${url}`, '--new-window'];
+      if (readFullscreenPreference()) args.push('--start-fullscreen');
+      spawn(edge, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    }
     else spawn('explorer.exe', [url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   } catch {
     // If Edge is unavailable, the server remains usable at the local URL.
@@ -767,7 +1202,12 @@ async function run() {
     if (error.code === 'EADDRINUSE') launchWindow();
     else process.exitCode = 1;
   });
-  server.listen(PORT, HOST, launchWindow);
+  server.listen(PORT, HOST, () => {
+    void loadLocalSpeechEngine().catch(() => {});
+    launchWindow();
+  });
 }
+
+process.on('exit', stopForegroundListener);
 
 run();
